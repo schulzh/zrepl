@@ -10,6 +10,115 @@ import (
 	"github.com/zrepl/zrepl/zfs"
 )
 
+//go:generate enumer -type=StepProtectionStrategyKind -json -transform=snake -trimprefix=StepProtectionStrategyKind
+type StepProtectionStrategyKind int
+
+const (
+	StepProtectionStrategyKindHolds StepProtectionStrategyKind = 1 << iota
+	StepProtectionStrategyKindBookmarks
+	StepProtectionStrategyKindNone
+)
+
+type StepProtectionStrategy interface {
+	Kind() StepProtectionStrategyKind
+	PreSend(ctx context.Context, jid JobID, sendArgs *zfs.ZFSSendArgsValidated) (keep []Abstraction, err error)
+}
+
+func StepProtectionStrategyFromKind(k StepProtectionStrategyKind) StepProtectionStrategy {
+	switch k {
+	case StepProtectionStrategyKindNone:
+		return StepProtectionStrategyNone{}
+	case StepProtectionStrategyKindBookmarks:
+		return StepProtectionStrategyBookmarks{}
+	case StepProtectionStrategyKindHolds:
+		return StepProtectionStrategyHolds{}
+	default:
+		panic(fmt.Sprintf("unreachable: %q %T", k, k))
+	}
+}
+
+type StepProtectionStrategyNone struct{}
+
+func (s StepProtectionStrategyNone) Kind() StepProtectionStrategyKind {
+	return StepProtectionStrategyKindNone
+}
+
+func (s StepProtectionStrategyNone) PreSend(ctx context.Context, jid JobID, sendArgs *zfs.ZFSSendArgsValidated) (keep []Abstraction, err error) {
+	return nil, nil
+}
+
+type StepProtectionStrategyBookmarks struct{}
+
+func (s StepProtectionStrategyBookmarks) Kind() StepProtectionStrategyKind {
+	return StepProtectionStrategyKindBookmarks
+}
+
+func (s StepProtectionStrategyBookmarks) PreSend(ctx context.Context, jid JobID, sendArgs *zfs.ZFSSendArgsValidated) (keep []Abstraction, err error) {
+
+	if sendArgs.FromVersion != nil {
+		from, err := BookmarkStep(ctx, sendArgs.FS, *sendArgs.FromVersion, jid)
+		if err != nil {
+			if err == zfs.ErrBookmarkCloningNotSupported {
+				getLogger(ctx).WithField("step_protection_strategy", s).
+					WithField("bookmark", sendArgs.From.FullPath(sendArgs.FS)).
+					Info("bookmark cloning is not supported, speculating that `from` will not be destroyed until step is done")
+			} else {
+				return nil, err
+			}
+		}
+		keep = append(keep, from)
+	}
+	to, err := BookmarkStep(ctx, sendArgs.FS, sendArgs.ToVersion, jid)
+	if err != nil {
+		return nil, err
+	}
+	keep = append(keep, to)
+
+	return keep, nil
+}
+
+type StepProtectionStrategyHolds struct{}
+
+func (s StepProtectionStrategyHolds) Kind() StepProtectionStrategyKind {
+	return StepProtectionStrategyKindHolds
+}
+
+func (s StepProtectionStrategyHolds) PreSend(ctx context.Context, jid JobID, sendArgs *zfs.ZFSSendArgsValidated) (keep []Abstraction, err error) {
+
+	if sendArgs.FromVersion != nil {
+		if sendArgs.FromVersion.Type == zfs.Bookmark {
+			getLogger(ctx).WithField("step_protection_strategy", s).WithField("fromVersion", sendArgs.FromVersion.FullPath(sendArgs.FS)).
+				Debug("cannot hold a bookmark, trying to fall back to a step bookmark")
+			from, err := BookmarkStep(ctx, sendArgs.FS, *sendArgs.FromVersion, jid)
+			if err != nil {
+				if err == zfs.ErrBookmarkCloningNotSupported {
+					getLogger(ctx).WithField("step_protection_strategy", s).
+						WithField("bookmark", sendArgs.From.FullPath(sendArgs.FS)).
+						Info("bookmark cloning is not supported, speculating that `from` will not be destroyed until step is done")
+				} else {
+					return nil, err
+				}
+			}
+			keep = append(keep, from)
+		} else {
+			from, err := HoldStep(ctx, sendArgs.FS, *sendArgs.FromVersion, jid)
+			if err != nil {
+				return nil, err
+			}
+			keep = append(keep, from)
+		}
+		// fallthrough
+	}
+
+	to, err := HoldStep(ctx, sendArgs.FS, sendArgs.ToVersion, jid)
+	if err != nil {
+		return nil, err
+	}
+	keep = append(keep, to)
+
+	return keep, nil
+}
+
 var stepHoldTagRE = regexp.MustCompile("^zrepl_STEP_J_(.+)")
 
 func StepHoldTag(jobid JobID) (string, error) {
@@ -59,33 +168,33 @@ func ParseStepBookmarkName(fullname string) (guid uint64, jobID JobID, err error
 	return guid, jobID, err
 }
 
-// idempotently hold / step-bookmark `version`
-//
-// returns ErrBookmarkCloningNotSupported if version is a bookmark and bookmarking bookmarks is not supported by ZFS
+// idempotently hold `version`
 func HoldStep(ctx context.Context, fs string, v zfs.FilesystemVersion, jobID JobID) (Abstraction, error) {
-	if v.IsSnapshot() {
-
-		tag, err := StepHoldTag(jobID)
-		if err != nil {
-			return nil, errors.Wrap(err, "step hold tag")
-		}
-
-		if err := zfs.ZFSHold(ctx, fs, v, tag); err != nil {
-			return nil, errors.Wrap(err, "step hold: zfs")
-		}
-
-		return &holdBasedAbstraction{
-			Type:              AbstractionStepHold,
-			FS:                fs,
-			Tag:               tag,
-			JobID:             jobID,
-			FilesystemVersion: v,
-		}, nil
+	if !v.IsSnapshot() {
+		panic(fmt.Sprintf("version must be a snapshot got %#v", v))
 	}
 
-	if !v.IsBookmark() {
-		panic(fmt.Sprintf("version must bei either snapshot or bookmark, got %#v", v))
+	tag, err := StepHoldTag(jobID)
+	if err != nil {
+		return nil, errors.Wrap(err, "step hold tag")
 	}
+
+	if err := zfs.ZFSHold(ctx, fs, v, tag); err != nil {
+		return nil, errors.Wrap(err, "step hold: zfs")
+	}
+
+	return &holdBasedAbstraction{
+		Type:              AbstractionStepHold,
+		FS:                fs,
+		Tag:               tag,
+		JobID:             jobID,
+		FilesystemVersion: v,
+	}, nil
+
+}
+
+// returns ErrBookmarkCloningNotSupported if version is a bookmark and bookmarking bookmarks is not supported by ZFS
+func BookmarkStep(ctx context.Context, fs string, v zfs.FilesystemVersion, jobID JobID) (Abstraction, error) {
 
 	bmname, err := StepBookmarkName(fs, v.Guid, jobID)
 	if err != nil {

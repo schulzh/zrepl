@@ -21,10 +21,10 @@ import (
 )
 
 type SenderConfig struct {
-	FSF                         zfs.DatasetFilter
-	Encrypt                     *zfs.NilBool
-	DisableIncrementalStepHolds bool
-	JobID                       JobID
+	FSF                                   zfs.DatasetFilter
+	Encrypt                               *zfs.NilBool
+	IncrementalStepProtectionStrategyKind StepProtectionStrategyKind
+	JobID                                 JobID
 }
 
 func (c *SenderConfig) Validate() error {
@@ -40,10 +40,10 @@ func (c *SenderConfig) Validate() error {
 
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
-	FSFilter                    zfs.DatasetFilter
-	encrypt                     *zfs.NilBool
-	disableIncrementalStepHolds bool
-	jobId                       JobID
+	FSFilter                          zfs.DatasetFilter
+	encrypt                           *zfs.NilBool
+	incrementalStepProtectionStrategy StepProtectionStrategy
+	jobId                             JobID
 }
 
 func NewSender(conf SenderConfig) *Sender {
@@ -51,10 +51,10 @@ func NewSender(conf SenderConfig) *Sender {
 		panic("invalid config" + err.Error())
 	}
 	return &Sender{
-		FSFilter:                    conf.FSF,
-		encrypt:                     conf.Encrypt,
-		disableIncrementalStepHolds: conf.DisableIncrementalStepHolds,
-		jobId:                       conf.JobID,
+		FSFilter:                          conf.FSF,
+		encrypt:                           conf.Encrypt,
+		incrementalStepProtectionStrategy: StepProtectionStrategyFromKind(conf.IncrementalStepProtectionStrategyKind),
+		jobId:                             conf.JobID,
 	}
 }
 
@@ -224,25 +224,24 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.Rea
 		}
 	}
 
-	takeStepHolds := sendArgs.FromVersion == nil || !s.disableIncrementalStepHolds
-
-	var fromHold, toHold Abstraction
-	// make sure `From` doesn't go away in order to make this step resumable
-	if sendArgs.From != nil && takeStepHolds {
-		fromHold, err = HoldStep(ctx, sendArgs.FS, *sendArgs.FromVersion, s.jobId) // no shadow
-		if err == zfs.ErrBookmarkCloningNotSupported {
-			getLogger(ctx).Debug("not creating step bookmark because ZFS does not support it")
-			// fallthrough
-		} else if err != nil {
-			return nil, nil, errors.Wrapf(err, "cannot hold `from` version %q before starting send", *sendArgs.FromVersion)
-		}
+	// create holds or bookmarks of `From` and `To` to guarantee one of the following:
+	// - that the replication step can always be resumed (`holds`),
+	// - that the replication step can be interrupted and a future replication
+	//   step with same or different `To` but same `From` is still possible (`bookmarks`)
+	// - nothing (`none`)
+	//
+	// ...
+	//
+	// initial sends are always protected by holds
+	stepProtectionStrategy := StepProtectionStrategyFromKind(StepProtectionStrategyKindHolds)
+	if sendArgs.From != nil {
+		// incrementals are configurable
+		stepProtectionStrategy = s.incrementalStepProtectionStrategy
 	}
-	if takeStepHolds {
-		// make sure `To` doesn't go away in order to make this step resumable
-		toHold, err = HoldStep(ctx, sendArgs.FS, sendArgs.ToVersion, s.jobId)
-		if err != nil {
-			return nil, nil, errors.Wrapf(err, "cannot hold `to` version %q before starting send", sendArgs.ToVersion)
-		}
+	// ... actually create the abstractions
+	stepProtectionAbstractions, err := stepProtectionStrategy.PreSend(ctx, s.jobId, &sendArgs)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "cannot apply incremental step protection")
 	}
 
 	// cleanup the mess that _this function_ might have created in prior failed attempts:
@@ -261,7 +260,8 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.Rea
 	//
 	// Note further that a resuming send, due to the idempotent nature of func CreateReplicationCursor and HoldStep,
 	// will never lose its step holds because we just (idempotently re-)created them above, before attempting the cleanup.
-	liveAbs := []Abstraction{fromHold, toHold, fromReplicationCursor}
+	liveAbs := []Abstraction{fromReplicationCursor}
+	liveAbs = append(liveAbs, stepProtectionAbstractions...)
 	func() {
 		ctx, endSpan := trace.WithSpan(ctx, "cleanup-stale-abstractions")
 		defer endSpan()
@@ -283,9 +283,18 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.Rea
 			for _, staleVersion := range obsoleteAbs {
 				for _, mustLiveVersion := range mustLiveVersions {
 					isSendArg := zfs.FilesystemVersionEqualIdentity(mustLiveVersion, staleVersion.GetFilesystemVersion())
-					isStepHoldWeMightHaveCreatedWithCurrentValueOf_takeStepHolds :=
-						takeStepHolds && staleVersion.GetType() == AbstractionStepHold
-					if isSendArg && isStepHoldWeMightHaveCreatedWithCurrentValueOf_takeStepHolds {
+					stepHoldBasedProtectionStrategy := false
+					k := stepProtectionStrategy.Kind()
+					switch k {
+					case StepProtectionStrategyKindHolds:
+						stepHoldBasedProtectionStrategy = true
+					case StepProtectionStrategyKindBookmarks:
+					case StepProtectionStrategyKindNone:
+					default:
+						panic(fmt.Sprintf("this is supposed to be an exhaustive match, got %v", k))
+					}
+					isSnapshot := mustLiveVersion.IsSnapshot()
+					if isSendArg && (!isSnapshot || stepHoldBasedProtectionStrategy) {
 						panic(fmt.Sprintf("impl error: %q would be destroyed because it is considered stale but it is part of of sendArgs=%s", mustLiveVersion.String(), pretty.Sprint(sendArgs)))
 					}
 				}

@@ -12,7 +12,6 @@ import (
 	"github.com/zrepl/zrepl/daemon/logging/trace"
 
 	"github.com/zrepl/zrepl/config"
-	"github.com/zrepl/zrepl/daemon/filters"
 	"github.com/zrepl/zrepl/daemon/job/reset"
 	"github.com/zrepl/zrepl/daemon/job/wakeup"
 	"github.com/zrepl/zrepl/daemon/pruner"
@@ -145,23 +144,18 @@ func (m *modePush) ResetConnectBackoff() {
 
 func modePushFromConfig(g *config.Global, in *config.PushJob, jobID endpoint.JobID) (*modePush, error) {
 	m := &modePush{}
+	var err error
 
-	fsf, err := filters.DatasetMapFilterFromConfig(in.Filesystems)
+	m.senderConfig, err = buildSenderConfig(in, jobID)
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot build filesystem filter")
+		return nil, errors.Wrap(err, "sender config")
 	}
 
-	m.senderConfig = &endpoint.SenderConfig{
-		FSF:                         fsf,
-		Encrypt:                     &zfs.NilBool{B: in.Send.Encrypted},
-		DisableIncrementalStepHolds: in.Send.StepHolds.DisableIncremental,
-		JobID:                       jobID,
-	}
 	m.plannerPolicy = &logic.PlannerPolicy{
 		EncryptedSend: logic.TriFromBool(in.Send.Encrypted),
 	}
 
-	if m.snapper, err = snapper.FromConfig(g, fsf, in.Snapshotting); err != nil {
+	if m.snapper, err = snapper.FromConfig(g, m.senderConfig.FSF, in.Snapshotting); err != nil {
 		return nil, errors.Wrap(err, "cannot build snapper")
 	}
 

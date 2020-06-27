@@ -176,7 +176,7 @@ func (j *SnapJob) doPrune(ctx context.Context) {
 		// FIXME encryption setting is irrelevant for SnapJob because the endpoint is only used as pruner.Target
 		Encrypt: &zfs.NilBool{B: true},
 		// FIXME DisableIncrementalStepHolds setting is irrelevant for SnapJob because the endpoint is only used as pruner.Target
-		DisableIncrementalStepHolds: false,
+		IncrementalStepProtectionStrategyKind: endpoint.StepProtectionStrategyKindNone,
 	})
 	j.pruner = j.prunerFactory.BuildLocalPruner(ctx, sender, alwaysUpToDateReplicationCursorHistory{sender})
 	log.Info("start pruning")

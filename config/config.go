@@ -76,12 +76,8 @@ type SnapJob struct {
 }
 
 type SendOptions struct {
-	Encrypted bool                 `yaml:"encrypted"`
-	StepHolds SendOptionsStepHolds `yaml:"step_holds,optional"`
-}
-
-type SendOptionsStepHolds struct {
-	DisableIncremental bool `yaml:"disable_incremental,optional"`
+	Encrypted                 bool   `yaml:"encrypted"`
+	IncrementalStepProtection string `yaml:"incremental_step_protection,optional"`
 }
 
 var _ yaml.Defaulter = (*SendOptions)(nil)
@@ -110,6 +106,9 @@ type PushJob struct {
 	Filesystems  FilesystemsFilter `yaml:"filesystems"`
 	Send         *SendOptions      `yaml:"send,fromdefaults,optional"`
 }
+
+func (j *PushJob) GetFilesystems() FilesystemsFilter { return j.Filesystems }
+func (j *PushJob) GetSendOptions() *SendOptions      { return j.Send }
 
 type PullJob struct {
 	ActiveJob `yaml:",inline"`
@@ -161,6 +160,9 @@ type SourceJob struct {
 	Filesystems  FilesystemsFilter `yaml:"filesystems"`
 	Send         *SendOptions      `yaml:"send,optional,fromdefaults"`
 }
+
+func (j *SourceJob) GetFilesystems() FilesystemsFilter { return j.Filesystems }
+func (j *SourceJob) GetSendOptions() *SendOptions      { return j.Send }
 
 type FilesystemsFilter map[string]bool
 

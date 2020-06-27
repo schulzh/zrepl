@@ -27,11 +27,11 @@ import (
 // of a new sender and receiver instance and one blocking invocation
 // of the replication engine without encryption
 type replicationInvocation struct {
-	sjid, rjid                  endpoint.JobID
-	sfs                         string
-	rfsRoot                     string
-	interceptSender             func(e *endpoint.Sender) logic.Sender
-	disableIncrementalStepHolds bool
+	sjid, rjid                        endpoint.JobID
+	sfs                               string
+	rfsRoot                           string
+	interceptSender                   func(e *endpoint.Sender) logic.Sender
+	incrementalStepProtectionStrategy endpoint.StepProtectionStrategyKind
 }
 
 func (i replicationInvocation) Do(ctx *platformtest.Context) *report.Report {
@@ -44,10 +44,10 @@ func (i replicationInvocation) Do(ctx *platformtest.Context) *report.Report {
 	err := sfilter.Add(i.sfs, "ok")
 	require.NoError(ctx, err)
 	sender := i.interceptSender(endpoint.NewSender(endpoint.SenderConfig{
-		FSF:                         sfilter.AsFilter(),
-		Encrypt:                     &zfs.NilBool{B: false},
-		DisableIncrementalStepHolds: i.disableIncrementalStepHolds,
-		JobID:                       i.sjid,
+		FSF:                                   sfilter.AsFilter(),
+		Encrypt:                               &zfs.NilBool{B: false},
+		IncrementalStepProtectionStrategyKind: i.incrementalStepProtectionStrategy,
+		JobID:                                 i.sjid,
 	}))
 	receiver := endpoint.NewReceiver(endpoint.ReceiverConfig{
 		JobID:                      i.rjid,
@@ -89,11 +89,11 @@ func ReplicationIncrementalIsPossibleIfCommonSnapshotIsDestroyed(ctx *platformte
 	snap1 := fsversion(ctx, sfs, "@1")
 
 	rep := replicationInvocation{
-		sjid:                        sjid,
-		rjid:                        rjid,
-		sfs:                         sfs,
-		rfsRoot:                     rfsRoot,
-		disableIncrementalStepHolds: false,
+		sjid:                              sjid,
+		rjid:                              rjid,
+		sfs:                               sfs,
+		rfsRoot:                           rfsRoot,
+		incrementalStepProtectionStrategy: endpoint.StepProtectionStrategyKindHolds,
 	}
 	rfs := rep.ReceiveSideFilesystem()
 
@@ -153,11 +153,11 @@ func implReplicationIncrementalCleansUpStaleAbstractions(ctx *platformtest.Conte
 	rfsRoot := ctx.RootDataset + "/receiver"
 
 	rep := replicationInvocation{
-		sjid:                        sjid,
-		rjid:                        rjid,
-		sfs:                         sfs,
-		rfsRoot:                     rfsRoot,
-		disableIncrementalStepHolds: false,
+		sjid:                              sjid,
+		rjid:                              rjid,
+		sfs:                               sfs,
+		rfsRoot:                           rfsRoot,
+		incrementalStepProtectionStrategy: endpoint.StepProtectionStrategyKindHolds,
 	}
 	rfs := rep.ReceiveSideFilesystem()
 
@@ -327,15 +327,15 @@ func (s *PartialSender) Send(ctx context.Context, r *pdu.SendReq) (r1 *pdu.SendR
 	return r1, r2, r3
 }
 
-func ReplicationIsResumableFullSend__DisableIncrementalStepHolds_False(ctx *platformtest.Context) {
-	implReplicationIsResumableFullSend(ctx, false)
+func ReplicationIsResumableFullSend__iStepProtStrat_Holds(ctx *platformtest.Context) {
+	implReplicationIsResumableFullSend(ctx, endpoint.StepProtectionStrategyKindHolds)
 }
 
-func ReplicationIsResumableFullSend__DisableIncrementalStepHolds_True(ctx *platformtest.Context) {
-	implReplicationIsResumableFullSend(ctx, true)
+func ReplicationIsResumableFullSend__iStepProtStrat_True(ctx *platformtest.Context) {
+	implReplicationIsResumableFullSend(ctx, endpoint.StepProtectionStrategyKindBookmarks)
 }
 
-func implReplicationIsResumableFullSend(ctx *platformtest.Context, disableIncrementalStepHolds bool) {
+func implReplicationIsResumableFullSend(ctx *platformtest.Context, incrementalStepProtectionStrategy endpoint.StepProtectionStrategyKind) {
 
 	platformtest.Run(ctx, platformtest.PanicErr, ctx.RootDataset, `
 		CREATEROOT
@@ -366,7 +366,7 @@ func implReplicationIsResumableFullSend(ctx *platformtest.Context, disableIncrem
 		interceptSender: func(e *endpoint.Sender) logic.Sender {
 			return &PartialSender{Sender: e, failAfterByteCount: 1 << 20}
 		},
-		disableIncrementalStepHolds: disableIncrementalStepHolds,
+		incrementalStepProtectionStrategy: incrementalStepProtectionStrategy,
 	}
 	rfs := rep.ReceiveSideFilesystem()
 
@@ -428,11 +428,11 @@ func ReplicationIncrementalDestroysStepHoldsIffIncrementalStepHoldsAreDisabledBu
 	{
 		mustSnapshot(ctx, sfs+"@1")
 		rep := replicationInvocation{
-			sjid:                        sjid,
-			rjid:                        rjid,
-			sfs:                         sfs,
-			rfsRoot:                     rfsRoot,
-			disableIncrementalStepHolds: false,
+			sjid:                              sjid,
+			rjid:                              rjid,
+			sfs:                               sfs,
+			rfsRoot:                           rfsRoot,
+			incrementalStepProtectionStrategy: endpoint.StepProtectionStrategyKindHolds,
 		}
 		rfs := rep.ReceiveSideFilesystem()
 		report := rep.Do(ctx)
@@ -455,11 +455,11 @@ func ReplicationIncrementalDestroysStepHoldsIffIncrementalStepHoldsAreDisabledBu
 	// to effect a step-holds situation
 	{
 		rep := replicationInvocation{
-			sjid:                        sjid,
-			rjid:                        rjid,
-			sfs:                         sfs,
-			rfsRoot:                     rfsRoot,
-			disableIncrementalStepHolds: false, // !
+			sjid:                              sjid,
+			rjid:                              rjid,
+			sfs:                               sfs,
+			rfsRoot:                           rfsRoot,
+			incrementalStepProtectionStrategy: endpoint.StepProtectionStrategyKindHolds, // !
 			interceptSender: func(e *endpoint.Sender) logic.Sender {
 				return &PartialSender{Sender: e, failAfterByteCount: 1 << 20}
 			},
@@ -495,17 +495,17 @@ func ReplicationIncrementalDestroysStepHoldsIffIncrementalStepHoldsAreDisabledBu
 	// end of test setup
 	//
 
-	// retry replication with incremental step holds disabled
+	// retry replication with incremental step holds disabled (set to bookmarks-only in this case)
 	// - replication should not fail due to holds-related stuff
 	// - replication should fail intermittently due to partial sender being fully read
 	// - the partial sender is 1/4th the length of the stream, thus expect
 	//   successful replication after 5 more attempts
 	rep := replicationInvocation{
-		sjid:                        sjid,
-		rjid:                        rjid,
-		sfs:                         sfs,
-		rfsRoot:                     rfsRoot,
-		disableIncrementalStepHolds: true, // !
+		sjid:                              sjid,
+		rjid:                              rjid,
+		sfs:                               sfs,
+		rfsRoot:                           rfsRoot,
+		incrementalStepProtectionStrategy: endpoint.StepProtectionStrategyKindBookmarks, // !
 		interceptSender: func(e *endpoint.Sender) logic.Sender {
 			return &PartialSender{Sender: e, failAfterByteCount: 1 << 20}
 		},

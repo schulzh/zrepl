@@ -38,8 +38,8 @@ If ``encryption=false``, zrepl expects that filesystems matching ``filesystems``
 
 .. _job-send-option-step-holds-disable-incremental:
 
-``step_holds.disable_incremental`` option
------------------------------------------
+``step_protection`` option
+--------------------------
 
 The ``step_holds.disable_incremental`` variable controls whether the creation of :ref:`step holds <step-holds-and-bookmarks>` should be disabled for incremental replication.
 The default value is ``false``.
@@ -53,6 +53,10 @@ which is useful if replication happens so rarely (or fails so frequently) that t
 .. NOTE::
 
    When setting this flag to ``true``, existing step holds for the job will be destroyed on the next replication attempt.
+
+
+``disable_step_bookmarks`` option
+-------------------------------------------------------
 
 .. _job-recv-options:
 
