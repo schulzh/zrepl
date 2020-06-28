@@ -162,3 +162,22 @@ func (f *FilesystemReport) NextStep() *StepReport {
 func (f *StepReport) IsIncremental() bool {
 	return f.Info.From != ""
 }
+
+func (r *Report) GetFailedFilesystemsCount() int {
+	a := r.Attempts[0]
+	if a.State == AttemptPlanningError || a.State == AttemptFanOutError {
+		if len(a.Filesystems) == 0 {
+			return -1 // Job failed before enumerating the filesystems -> do not report zero errors
+		}
+
+		var count int
+		for _, f := range a.Filesystems {
+			if f.State == FilesystemPlanningErrored || f.State == FilesystemSteppingErrored {
+				count++
+			}
+		}
+		return count
+	}
+
+	return 0
+}
